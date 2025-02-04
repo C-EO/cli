@@ -162,7 +162,27 @@ func TestNewCmdBrowse(t *testing.T) {
 		},
 		{
 			name:     "passed both branch and commit flags",
-			cli:      "main.go --branch main --comit=12a4",
+			cli:      "main.go --branch main --commit=12a4",
+			wantsErr: true,
+		},
+		{
+			name:     "passed both number arg and branch flag",
+			cli:      "1 --branch trunk",
+			wantsErr: true,
+		},
+		{
+			name:     "passed both number arg and commit flag",
+			cli:      "1 --commit=12a4",
+			wantsErr: true,
+		},
+		{
+			name:     "passed both commit SHA arg and branch flag",
+			cli:      "de07febc26e19000f8c9e821207f3bc34a3c8038 --branch trunk",
+			wantsErr: true,
+		},
+		{
+			name:     "passed both commit SHA arg and commit flag",
+			cli:      "de07febc26e19000f8c9e821207f3bc34a3c8038 --commit=12a4",
 			wantsErr: true,
 		},
 	}
@@ -212,6 +232,7 @@ func Test_runBrowse(t *testing.T) {
 	tests := []struct {
 		name          string
 		opts          BrowseOptions
+		httpStub      func(*httpmock.Registry)
 		baseRepo      ghrepo.Interface
 		defaultBranch string
 		expectedURL   string
@@ -349,7 +370,7 @@ func Test_runBrowse(t *testing.T) {
 			opts: BrowseOptions{
 				SelectorArg: "chocolate-pecan-pie.txt",
 			},
-			baseRepo:      ghrepo.New("andrewhsu", "recipies"),
+			baseRepo:      ghrepo.New("andrewhsu", "recipes"),
 			defaultBranch: "",
 			wantsErr:      true,
 		},
@@ -411,6 +432,12 @@ func Test_runBrowse(t *testing.T) {
 				Branch:        "3-0-stable",
 				SelectorArg:   "init.rb:6",
 				NoBrowserFlag: true,
+			},
+			httpStub: func(r *httpmock.Registry) {
+				r.Register(
+					httpmock.REST("HEAD", "repos/mislav/will_paginate"),
+					httpmock.StringResponse("{}"),
+				)
 			},
 			baseRepo:    ghrepo.New("mislav", "will_paginate"),
 			wantsErr:    false,
@@ -485,6 +512,20 @@ func Test_runBrowse(t *testing.T) {
 			wantsErr:      false,
 		},
 		{
+			name: "does not use relative path when has repo override",
+			opts: BrowseOptions{
+				SelectorArg:     "README.md",
+				HasRepoOverride: true,
+				PathFromRepoRoot: func() string {
+					return "pkg/cmd/browse/"
+				},
+			},
+			baseRepo:      ghrepo.New("bchadwic", "gh-graph"),
+			defaultBranch: "trunk",
+			expectedURL:   "https://github.com/bchadwic/gh-graph/tree/trunk/README.md",
+			wantsErr:      false,
+		},
+		{
 			name: "use special characters in selector arg",
 			opts: BrowseOptions{
 				SelectorArg: "?=hello world/ *:23-44",
@@ -534,6 +575,10 @@ func Test_runBrowse(t *testing.T) {
 			defer reg.Verify(t)
 			if tt.defaultBranch != "" {
 				reg.StubRepoInfoResponse(tt.baseRepo.RepoOwner(), tt.baseRepo.RepoName(), tt.defaultBranch)
+			}
+
+			if tt.httpStub != nil {
+				tt.httpStub(&reg)
 			}
 
 			opts := tt.opts

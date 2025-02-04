@@ -7,10 +7,10 @@ import (
 
 	"github.com/cli/cli/v2/context"
 	"github.com/cli/cli/v2/git"
-	"github.com/cli/cli/v2/internal/config"
+	"github.com/cli/cli/v2/internal/gh"
 	"github.com/cli/cli/v2/internal/ghinstance"
 	"github.com/cli/cli/v2/pkg/set"
-	"github.com/cli/go-gh/pkg/ssh"
+	"github.com/cli/go-gh/v2/pkg/ssh"
 )
 
 const (
@@ -19,7 +19,7 @@ const (
 
 type remoteResolver struct {
 	readRemotes   func() (git.RemoteSet, error)
-	getConfig     func() (config.Config, error)
+	getConfig     func() (gh.Config, error)
 	urlTranslator context.Translator
 }
 
@@ -69,6 +69,7 @@ func (rr *remoteResolver) Resolver() func() (context.Remotes, error) {
 		sort.Sort(resolvedRemotes)
 
 		// Filter remotes by hosts
+		// Note that this is not caching correctly: https://github.com/cli/cli/issues/10103
 		cachedRemotes := resolvedRemotes.FilterByHosts(hosts)
 
 		// Filter again by default host if one is set

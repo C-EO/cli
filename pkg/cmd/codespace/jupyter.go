@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/cli/cli/v2/internal/codespaces"
+	"github.com/cli/cli/v2/internal/codespaces/portforwarder"
 	"github.com/cli/cli/v2/internal/codespaces/rpc"
-	"github.com/cli/cli/v2/pkg/liveshare"
 	"github.com/spf13/cobra"
 )
 
@@ -39,29 +39,40 @@ func (a *App) Jupyter(ctx context.Context, selector *CodespaceSelector) (err err
 		return err
 	}
 
-	session, err := startLiveShareSession(ctx, codespace, a, false, "")
+	codespaceConnection, err := codespaces.GetCodespaceConnection(ctx, a, a.apiClient, codespace)
 	if err != nil {
-		return err
+		return fmt.Errorf("error connecting to codespace: %w", err)
 	}
-	defer safeClose(session, &err)
 
-	serverPort, serverUrl := 0, ""
+	fwd, err := portforwarder.NewPortForwarder(ctx, codespaceConnection)
+	if err != nil {
+		return fmt.Errorf("failed to create port forwarder: %w", err)
+	}
+	defer safeClose(fwd, &err)
+
+	var (
+		invoker    rpc.Invoker
+		serverPort int
+		serverUrl  string
+	)
 	err = a.RunWithProgress("Starting JupyterLab on codespace", func() (err error) {
-		invoker, err := rpc.CreateInvoker(ctx, session)
+		invoker, err = rpc.CreateInvoker(ctx, fwd)
 		if err != nil {
 			return
 		}
-		defer safeClose(invoker, &err)
 
 		serverPort, serverUrl, err = invoker.StartJupyterServer(ctx)
 		return
 	})
+	if invoker != nil {
+		defer safeClose(invoker, &err)
+	}
 	if err != nil {
 		return err
 	}
 
 	// Pass 0 to pick a random port
-	listen, _, err := codespaces.ListenTCP(0)
+	listen, _, err := codespaces.ListenTCP(0, false)
 	if err != nil {
 		return err
 	}
@@ -70,8 +81,10 @@ func (a *App) Jupyter(ctx context.Context, selector *CodespaceSelector) (err err
 
 	tunnelClosed := make(chan error, 1)
 	go func() {
-		fwd := liveshare.NewPortForwarder(session, "jupyter", serverPort, true)
-		tunnelClosed <- fwd.ForwardToListener(ctx, listen) // always non-nil
+		opts := portforwarder.ForwardPortOpts{
+			Port: serverPort,
+		}
+		tunnelClosed <- fwd.ForwardPortToListener(ctx, opts, listen)
 	}()
 
 	// Server URL contains an authentication token that must be preserved

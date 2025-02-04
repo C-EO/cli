@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/MakeNowJust/heredoc"
+	"github.com/cli/cli/v2/internal/codespaces"
 	"github.com/cli/cli/v2/internal/codespaces/api"
+	"github.com/cli/cli/v2/internal/codespaces/portforwarder"
 	"github.com/cli/cli/v2/internal/codespaces/rpc"
 	"github.com/spf13/cobra"
 )
@@ -18,9 +21,12 @@ func newRebuildCmd(app *App) *cobra.Command {
 	rebuildCmd := &cobra.Command{
 		Use:   "rebuild",
 		Short: "Rebuild a codespace",
-		Long: `Rebuilding recreates your codespace. Your code and any current changes will be
-preserved. Your codespace will be rebuilt using your working directory's
-dev container. A full rebuild also removes cached Docker images.`,
+		Long: heredoc.Doc(`
+			Rebuilding recreates your codespace.
+			
+			Your code and any current changes will be preserved. Your codespace will be rebuilt using
+			your working directory's dev container. A full rebuild also removes cached Docker images.
+		`),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return app.Rebuild(cmd.Context(), selector, fullRebuild)
@@ -49,13 +55,18 @@ func (a *App) Rebuild(ctx context.Context, selector *CodespaceSelector, full boo
 		return nil
 	}
 
-	session, err := startLiveShareSession(ctx, codespace, a, false, "")
+	codespaceConnection, err := codespaces.GetCodespaceConnection(ctx, a, a.apiClient, codespace)
 	if err != nil {
-		return fmt.Errorf("starting Live Share session: %w", err)
+		return fmt.Errorf("error connecting to codespace: %w", err)
 	}
-	defer safeClose(session, &err)
 
-	invoker, err := rpc.CreateInvoker(ctx, session)
+	fwd, err := portforwarder.NewPortForwarder(ctx, codespaceConnection)
+	if err != nil {
+		return fmt.Errorf("failed to create port forwarder: %w", err)
+	}
+	defer safeClose(fwd, &err)
+
+	invoker, err := rpc.CreateInvoker(ctx, fwd)
 	if err != nil {
 		return err
 	}
