@@ -8,17 +8,17 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/AlecAivazis/survey/v2/terminal"
 	clicontext "github.com/cli/cli/v2/context"
 	"github.com/cli/cli/v2/internal/browser"
-	"github.com/cli/cli/v2/internal/codespaces"
 	"github.com/cli/cli/v2/internal/codespaces/api"
 	"github.com/cli/cli/v2/pkg/iostreams"
-	"github.com/cli/cli/v2/pkg/liveshare"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -63,30 +63,9 @@ func (a *App) RunWithProgress(label string, run func() error) error {
 	return a.io.RunWithProgress(label, run)
 }
 
-// Connects to a codespace using Live Share and returns that session
-func startLiveShareSession(ctx context.Context, codespace *api.Codespace, a *App, debug bool, debugFile string) (session *liveshare.Session, err error) {
-	liveshareLogger := noopLogger()
-	if debug {
-		debugLogger, err := newFileLogger(debugFile)
-		if err != nil {
-			return nil, fmt.Errorf("couldn't create file logger: %w", err)
-		}
-		defer safeClose(debugLogger, &err)
-
-		liveshareLogger = debugLogger.Logger
-		a.errLogger.Printf("Debug file located at: %s", debugLogger.Name())
-	}
-
-	session, err = codespaces.ConnectToLiveshare(ctx, a, liveshareLogger, a.apiClient, codespace)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Live Share: %w", err)
-	}
-
-	return session, nil
-}
-
 //go:generate moq -fmt goimports -rm -skip-ensure -out mock_api.go . apiClient
 type apiClient interface {
+	ServerURL() string
 	GetUser(ctx context.Context) (*api.User, error)
 	GetCodespace(ctx context.Context, name string, includeConnection bool) (*api.Codespace, error)
 	GetOrgMemberCodespace(ctx context.Context, orgName string, userName string, codespaceName string) (*api.Codespace, error)
@@ -97,11 +76,13 @@ type apiClient interface {
 	CreateCodespace(ctx context.Context, params *api.CreateCodespaceParams) (*api.Codespace, error)
 	EditCodespace(ctx context.Context, codespaceName string, params *api.EditCodespaceParams) (*api.Codespace, error)
 	GetRepository(ctx context.Context, nwo string) (*api.Repository, error)
-	GetCodespacesMachines(ctx context.Context, repoID int, branch, location string, devcontainerPath string) ([]*api.Machine, error)
+	GetCodespacesMachines(ctx context.Context, repoID int, branch string, location string, devcontainerPath string) ([]*api.Machine, error)
+	GetCodespacesPermissionsCheck(ctx context.Context, repoID int, branch string, devcontainerPath string) (bool, error)
 	GetCodespaceRepositoryContents(ctx context.Context, codespace *api.Codespace, path string) ([]byte, error)
 	ListDevContainers(ctx context.Context, repoID int, branch string, limit int) (devcontainers []api.DevContainerEntry, err error)
 	GetCodespaceRepoSuggestions(ctx context.Context, partialSearch string, params api.RepoSearchParameters) ([]string, error)
 	GetCodespaceBillableOwner(ctx context.Context, nwo string) (*api.User, error)
+	HTTPClient() (*http.Client, error)
 }
 
 var errNoCodespaces = errors.New("you have no codespaces")
@@ -133,10 +114,11 @@ func chooseCodespaceFromList(ctx context.Context, codespaces []*api.Codespace, i
 		},
 	}
 
+	prompter := &Prompter{}
 	var answers struct {
 		Codespace int
 	}
-	if err := ask(csSurvey, &answers); err != nil {
+	if err := prompter.Ask(csSurvey, &answers); err != nil {
 		return nil, fmt.Errorf("error getting answers: %w", err)
 	}
 
@@ -164,9 +146,15 @@ func safeClose(closer io.Closer, err *error) {
 // It is not portable to assume stdin/stdout are fds 0 and 1.
 var hasTTY = term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 
+type SurveyPrompter interface {
+	Ask(qs []*survey.Question, response interface{}) error
+}
+
+type Prompter struct{}
+
 // ask asks survey questions on the terminal, using standard options.
 // It fails unless hasTTY, but ideally callers should avoid calling it in that case.
-func ask(qs []*survey.Question, response interface{}) error {
+func (p *Prompter) Ask(qs []*survey.Question, response interface{}) error {
 	if !hasTTY {
 		return fmt.Errorf("no terminal")
 	}
@@ -197,10 +185,6 @@ func noArgsConstraint(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func noopLogger() *log.Logger {
-	return log.New(io.Discard, "", 0)
-}
-
 type codespace struct {
 	*api.Codespace
 }
@@ -214,7 +198,7 @@ func (c codespace) displayName(includeOwner bool) string {
 		displayName = c.Name
 	}
 
-	description := fmt.Sprintf("%s (%s): %s", c.Repository.FullName, branch, displayName)
+	description := fmt.Sprintf("%s [%s]: %s", c.Repository.FullName, branch, displayName)
 
 	if includeOwner {
 		description = fmt.Sprintf("%-15s %s", c.Owner.Login, description)
@@ -265,4 +249,15 @@ func addDeprecatedRepoShorthand(cmd *cobra.Command, target *string) error {
 	}
 
 	return nil
+}
+
+// filterCodespacesByRepoOwner filters a list of codespaces by the owner of the repository.
+func filterCodespacesByRepoOwner(codespaces []*api.Codespace, repoOwner string) []*api.Codespace {
+	filtered := make([]*api.Codespace, 0, len(codespaces))
+	for _, c := range codespaces {
+		if strings.EqualFold(c.Repository.Owner.Login, repoOwner) {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered
 }

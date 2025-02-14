@@ -4,6 +4,7 @@ package context
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/cli/cli/v2/api"
@@ -98,7 +99,7 @@ func (r *ResolvedRemotes) BaseRepo(io *iostreams.IOStreams) (ghrepo.Interface, e
 	cs := io.ColorScheme()
 
 	fmt.Fprintf(io.ErrOut,
-		"%s No default remote repository has been set for this directory.\n",
+		"%s No default remote repository has been set. To learn more about the default repository, run: gh repo set-default --help\n",
 		cs.FailureIcon())
 
 	fmt.Fprintln(io.Out)
@@ -116,9 +117,11 @@ func (r *ResolvedRemotes) HeadRepos() ([]*api.Repository, error) {
 	}
 
 	var results []*api.Repository
+	var ids []string // Check if repo duplicates
 	for _, repo := range r.network.Repositories {
-		if repo != nil && repo.ViewerCanPush() {
+		if repo != nil && repo.ViewerCanPush() && !slices.Contains(ids, repo.ID) {
 			results = append(results, repo)
+			ids = append(ids, repo.ID)
 		}
 	}
 	return results, nil

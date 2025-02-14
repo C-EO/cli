@@ -29,8 +29,9 @@ func explainer() string {
 		 - viewing and creating pull requests
 		 - viewing and creating issues
 		 - viewing and creating releases
-		 - working with Actions
-		 - adding repository and environment secrets`)
+		 - working with GitHub Actions
+
+		### NOTE: gh does not use the default repository for managing repository and environment secrets.`)
 }
 
 type iprompter interface {
@@ -86,7 +87,7 @@ func NewCmdSetDefault(f *cmdutil.Factory, runF func(*SetDefaultOptions) error) *
 				}
 			}
 
-			if !opts.IO.CanPrompt() && opts.Repo == nil {
+			if !opts.ViewMode && !opts.IO.CanPrompt() && opts.Repo == nil {
 				return cmdutil.FlagErrorf("repository required when not running interactively")
 			}
 
@@ -118,16 +119,18 @@ func setDefaultRun(opts *SetDefaultOptions) error {
 
 	currentDefaultRepo, _ := remotes.ResolvedRemote()
 
+	cs := opts.IO.ColorScheme()
+
 	if opts.ViewMode {
-		if currentDefaultRepo == nil {
-			fmt.Fprintln(opts.IO.Out, "no default repository has been set; use `gh repo set-default` to select one")
-		} else {
+		if currentDefaultRepo != nil {
 			fmt.Fprintln(opts.IO.Out, displayRemoteRepoName(currentDefaultRepo))
+		} else {
+			fmt.Fprintf(opts.IO.ErrOut,
+				"%s No default remote repository has been set. To learn more about the default repository, run: gh repo set-default --help\n",
+				cs.FailureIcon())
 		}
 		return nil
 	}
-
-	cs := opts.IO.ColorScheme()
 
 	if opts.UnsetMode {
 		var msg string

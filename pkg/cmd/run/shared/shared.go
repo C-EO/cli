@@ -4,18 +4,21 @@ import (
 	"archive/zip"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"reflect"
 	"strings"
 	"time"
 
-	"github.com/AlecAivazis/survey/v2"
 	"github.com/cli/cli/v2/api"
 	"github.com/cli/cli/v2/internal/ghrepo"
 	workflowShared "github.com/cli/cli/v2/pkg/cmd/workflow/shared"
 	"github.com/cli/cli/v2/pkg/iostreams"
-	"github.com/cli/cli/v2/pkg/prompt"
 )
+
+type Prompter interface {
+	Select(string, string, []string) (int, error)
+}
 
 const (
 	// Run statuses
@@ -24,6 +27,7 @@ const (
 	InProgress Status = "in_progress"
 	Requested  Status = "requested"
 	Waiting    Status = "waiting"
+	Pending    Status = "pending"
 
 	// Run conclusions
 	ActionRequired Conclusion = "action_required"
@@ -44,6 +48,24 @@ type Status string
 type Conclusion string
 type Level string
 
+var AllStatuses = []string{
+	"queued",
+	"completed",
+	"in_progress",
+	"requested",
+	"waiting",
+	"pending",
+	"action_required",
+	"cancelled",
+	"failure",
+	"neutral",
+	"skipped",
+	"stale",
+	"startup_failure",
+	"success",
+	"timed_out",
+}
+
 var RunFields = []string{
 	"name",
 	"displayTitle",
@@ -52,6 +74,7 @@ var RunFields = []string{
 	"createdAt",
 	"updatedAt",
 	"startedAt",
+	"attempt",
 	"status",
 	"conclusion",
 	"event",
@@ -77,7 +100,7 @@ type Run struct {
 	workflowName   string // cache column
 	WorkflowID     int64  `json:"workflow_id"`
 	Number         int64  `json:"run_number"`
-	Attempts       uint64 `json:"run_attempt"`
+	Attempt        uint64 `json:"run_attempt"`
 	HeadBranch     string `json:"head_branch"`
 	JobsURL        string `json:"jobs_url"`
 	HeadCommit     Commit `json:"head_commit"`
@@ -159,16 +182,22 @@ func (r *Run) ExportData(fields []string) map[string]interface{} {
 			for _, j := range r.Jobs {
 				steps := make([]interface{}, 0, len(j.Steps))
 				for _, s := range j.Steps {
+					var stepCompletedAt time.Time
+					if !s.CompletedAt.IsZero() {
+						stepCompletedAt = s.CompletedAt
+					}
 					steps = append(steps, map[string]interface{}{
-						"name":       s.Name,
-						"status":     s.Status,
-						"conclusion": s.Conclusion,
-						"number":     s.Number,
+						"name":        s.Name,
+						"status":      s.Status,
+						"conclusion":  s.Conclusion,
+						"number":      s.Number,
+						"startedAt":   s.StartedAt,
+						"completedAt": stepCompletedAt,
 					})
 				}
-				var completedAt *time.Time
+				var jobCompletedAt time.Time
 				if !j.CompletedAt.IsZero() {
-					completedAt = &j.CompletedAt
+					jobCompletedAt = j.CompletedAt
 				}
 				jobs = append(jobs, map[string]interface{}{
 					"databaseId":  j.ID,
@@ -177,11 +206,11 @@ func (r *Run) ExportData(fields []string) map[string]interface{} {
 					"name":        j.Name,
 					"steps":       steps,
 					"startedAt":   j.StartedAt,
-					"completedAt": completedAt,
+					"completedAt": jobCompletedAt,
 					"url":         j.URL,
 				})
-				data[f] = jobs
 			}
+			data[f] = jobs
 		default:
 			sf := fieldByName(v, f)
 			data[f] = sf.Interface()
@@ -204,11 +233,13 @@ type Job struct {
 }
 
 type Step struct {
-	Name       string
-	Status     Status
-	Conclusion Conclusion
-	Number     int
-	Log        *zip.File
+	Name        string
+	Status      Status
+	Conclusion  Conclusion
+	Number      int
+	StartedAt   time.Time `json:"started_at"`
+	CompletedAt time.Time `json:"completed_at"`
+	Log         *zip.File
 }
 
 type Steps []Step
@@ -240,6 +271,14 @@ type CheckRun struct {
 	ID int64
 }
 
+var ErrMissingAnnotationsPermissions = errors.New("missing annotations permissions error")
+
+// GetAnnotations fetches annotations from the REST API.
+//
+// If the job has no annotations, an empty slice is returned.
+// If the API returns a 403, a custom ErrMissingAnnotationsPermissions error is returned.
+//
+// When fine-grained PATs support checks:read permission, we can remove the need for this at the call sites.
 func GetAnnotations(client *api.Client, repo ghrepo.Interface, job Job) ([]Annotation, error) {
 	var result []*Annotation
 
@@ -248,9 +287,18 @@ func GetAnnotations(client *api.Client, repo ghrepo.Interface, job Job) ([]Annot
 	err := client.REST(repo.RepoHost(), "GET", path, nil, &result)
 	if err != nil {
 		var httpError api.HTTPError
-		if errors.As(err, &httpError) && httpError.StatusCode == 404 {
+		if !errors.As(err, &httpError) {
+			return nil, err
+		}
+
+		if httpError.StatusCode == http.StatusNotFound {
 			return []Annotation{}, nil
 		}
+
+		if httpError.StatusCode == http.StatusForbidden {
+			return nil, ErrMissingAnnotationsPermissions
+		}
+
 		return nil, err
 	}
 
@@ -284,6 +332,10 @@ type FilterOptions struct {
 	WorkflowID int64
 	// avoid loading workflow name separately and use the provided one
 	WorkflowName string
+	Status       string
+	Event        string
+	Created      string
+	Commit       string
 }
 
 // GetRunsWithFilter fetches 50 runs from the API and filters them in-memory
@@ -325,6 +377,18 @@ func GetRuns(client *api.Client, repo ghrepo.Interface, opts *FilterOptions, lim
 		}
 		if opts.Actor != "" {
 			path += fmt.Sprintf("&actor=%s", url.QueryEscape(opts.Actor))
+		}
+		if opts.Status != "" {
+			path += fmt.Sprintf("&status=%s", url.QueryEscape(opts.Status))
+		}
+		if opts.Event != "" {
+			path += fmt.Sprintf("&event=%s", url.QueryEscape(opts.Event))
+		}
+		if opts.Created != "" {
+			path += fmt.Sprintf("&created=%s", url.QueryEscape(opts.Created))
+		}
+		if opts.Commit != "" {
+			path += fmt.Sprintf("&head_sha=%s", url.QueryEscape(opts.Commit))
 		}
 	}
 
@@ -393,19 +457,35 @@ func preloadWorkflowNames(client *api.Client, repo ghrepo.Interface, runs []Run)
 }
 
 type JobsPayload struct {
-	Jobs []Job
+	TotalCount int `json:"total_count"`
+	Jobs       []Job
 }
 
-func GetJobs(client *api.Client, repo ghrepo.Interface, run *Run) ([]Job, error) {
+func GetJobs(client *api.Client, repo ghrepo.Interface, run *Run, attempt uint64) ([]Job, error) {
 	if run.Jobs != nil {
 		return run.Jobs, nil
 	}
-	var result JobsPayload
-	if err := client.REST(repo.RepoHost(), "GET", run.JobsURL, nil, &result); err != nil {
-		return nil, err
+
+	query := url.Values{}
+	query.Set("per_page", "100")
+	jobsPath := fmt.Sprintf("%s?%s", run.JobsURL, query.Encode())
+
+	if attempt > 0 {
+		jobsPath = fmt.Sprintf("repos/%s/actions/runs/%d/attempts/%d/jobs?%s", ghrepo.FullName(repo), run.ID, attempt, query.Encode())
 	}
-	run.Jobs = result.Jobs
-	return result.Jobs, nil
+
+	for jobsPath != "" {
+		var resp JobsPayload
+		var err error
+		jobsPath, err = client.RESTWithNext(repo.RepoHost(), http.MethodGet, jobsPath, nil, &resp)
+		if err != nil {
+			run.Jobs = nil
+			return nil, err
+		}
+
+		run.Jobs = append(run.Jobs, resp.Jobs...)
+	}
+	return run.Jobs, nil
 }
 
 func GetJob(client *api.Client, repo ghrepo.Interface, jobID string) (*Job, error) {
@@ -420,8 +500,8 @@ func GetJob(client *api.Client, repo ghrepo.Interface, jobID string) (*Job, erro
 	return &result, nil
 }
 
-func PromptForRun(cs *iostreams.ColorScheme, runs []Run) (string, error) {
-	var selected int
+// SelectRun prompts the user to select a run from a list of runs by using the recommended prompter interface
+func SelectRun(p Prompter, cs *iostreams.ColorScheme, runs []Run) (string, error) {
 	now := time.Now()
 
 	candidates := []string{}
@@ -430,17 +510,10 @@ func PromptForRun(cs *iostreams.ColorScheme, runs []Run) (string, error) {
 		symbol, _ := Symbol(cs, run.Status, run.Conclusion)
 		candidates = append(candidates,
 			// TODO truncate commit message, long ones look terrible
-			fmt.Sprintf("%s %s, %s (%s) %s", symbol, run.Title(), run.WorkflowName(), run.HeadBranch, preciseAgo(now, run.StartedTime())))
+			fmt.Sprintf("%s %s, %s [%s] %s", symbol, run.Title(), run.WorkflowName(), run.HeadBranch, preciseAgo(now, run.StartedTime())))
 	}
 
-	// TODO consider custom filter so it's fuzzier. right now matches start anywhere in string but
-	// become contiguous
-	//nolint:staticcheck // SA1019: prompt.SurveyAskOne is deprecated: use Prompter
-	err := prompt.SurveyAskOne(&survey.Select{
-		Message:  "Select a workflow run",
-		Options:  candidates,
-		PageSize: 10,
-	}, &selected)
+	selected, err := p.Select("Select a workflow run", "", candidates)
 
 	if err != nil {
 		return "", err

@@ -106,7 +106,7 @@ func TestNewCmdCommits(t *testing.T) {
 						Parent:         "bbb",
 						Repo:           []string{"owner/repo"},
 						Tree:           "ccc",
-						User:           "owner",
+						User:           []string{"owner"},
 						Is:             []string{"public"},
 					},
 				},
@@ -273,7 +273,7 @@ func TestCommitsRun(t *testing.T) {
 				WebMode: true,
 			},
 			tty:        true,
-			wantStderr: "Opening github.com/search in your browser.\n",
+			wantStderr: "Opening https://github.com/search in your browser.\n",
 		},
 		{
 			name: "opens browser for web mode notty",

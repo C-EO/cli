@@ -45,7 +45,7 @@ func NewCmdCommits(f *cmdutil.Factory, runF func(*CommitsOptions) error) *cobra.
 
 			GitHub search syntax is documented at:
 			<https://docs.github.com/search-github/searching-on-github/searching-commits>
-    `),
+		`),
 		Example: heredoc.Doc(`
 			# search commits matching set of keywords "readme" and "typo"
 			$ gh search commits readme typo
@@ -64,7 +64,7 @@ func NewCmdCommits(f *cmdutil.Factory, runF func(*CommitsOptions) error) *cobra.
 
 			# search commits authored before February 1st, 2022
 			$ gh search commits --author-date="<2022-02-01"
-    `),
+		`),
 		RunE: func(c *cobra.Command, args []string) error {
 			if len(args) == 0 && c.Flags().NFlag() == 0 {
 				return cmdutil.FlagErrorf("specify search keywords or flags")
@@ -112,9 +112,9 @@ func NewCmdCommits(f *cmdutil.Factory, runF func(*CommitsOptions) error) *cobra.
 	cmd.Flags().StringVar(&opts.Query.Qualifiers.Hash, "hash", "", "Filter by commit hash")
 	cmdutil.NilBoolFlag(cmd, &opts.Query.Qualifiers.Merge, "merge", "", "Filter on merge commits")
 	cmd.Flags().StringVar(&opts.Query.Qualifiers.Parent, "parent", "", "Filter by parent hash")
-	cmd.Flags().StringSliceVar(&opts.Query.Qualifiers.Repo, "repo", nil, "Filter on repository")
+	cmd.Flags().StringSliceVarP(&opts.Query.Qualifiers.Repo, "repo", "R", nil, "Filter on repository")
 	cmd.Flags().StringVar(&opts.Query.Qualifiers.Tree, "tree", "", "Filter by tree hash")
-	cmd.Flags().StringVar(&opts.Query.Qualifiers.User, "owner", "", "Filter on repository owner")
+	cmd.Flags().StringSliceVar(&opts.Query.Qualifiers.User, "owner", nil, "Filter on repository owner")
 	cmdutil.StringSliceEnumFlag(cmd, &opts.Query.Qualifiers.Is, "visibility", "", nil, []string{"public", "private", "internal"}, "Filter based on repository visibility")
 
 	return cmd
@@ -155,8 +155,7 @@ func displayResults(io *iostreams.IOStreams, now time.Time, results search.Commi
 		now = time.Now()
 	}
 	cs := io.ColorScheme()
-	tp := tableprinter.New(io)
-	tp.HeaderRow("Repo", "SHA", "Message", "Author", "Created")
+	tp := tableprinter.New(io, tableprinter.WithHeader("Repo", "SHA", "Message", "Author", "Created"))
 	for _, commit := range results.Items {
 		tp.AddField(commit.Repo.FullName)
 		tp.AddField(commit.Sha)
